@@ -614,9 +614,9 @@ void *loop_i2c(void *arg) {
                 /* init all the modules */
                 if (*err==ERROR_NONE) *err=nim_init();
                 /* we are only using the one demodulator so set the other to 0 to turn it off */
-                if (*err==ERROR_NONE) *err=stv0910_init(config_cpy.sr_requested[config_cpy.sr_index],0,config_cpy.halfscan_ratio,0.0);
+                if (*err==ERROR_NONE) *err=stv0910_init(config_cpy.sr_requested[config_cpy.sr_index],config_cpy.sr_requested[config_cpy.sr_index],config_cpy.halfscan_ratio,0.0);
                 /* we only use one of the tuners in STV6120 so freq for tuner 2=0 to turn it off */
-                if (*err==ERROR_NONE) tuner_err=stv6120_init(config_cpy.freq_requested[config_cpy.freq_index],0,config_cpy.port_swap);
+                if (*err==ERROR_NONE) tuner_err=stv6120_init(config_cpy.freq_requested[config_cpy.freq_index],config_cpy.freq_requested[config_cpy.freq_index],config_cpy.port_swap);
                 
                 /* Tuner Lock timeout on some NIMs - Print message and pause, do..while() handles the retry logic */
                 if (*err==ERROR_NONE && tuner_err==ERROR_TUNER_LOCK_TIMEOUT)
