@@ -75,6 +75,15 @@ static longmynd_status_t longmynd_status = {
     .ts_packet_count_nolock = 0
 };
 
+static longmynd_status_t longmynd_status2 = {
+    .service_name = "\0",
+    .service_provider_name = "\0",
+    .last_updated_monotonic = 0,
+    .mutex = PTHREAD_MUTEX_INITIALIZER,
+    .signal = PTHREAD_COND_INITIALIZER,
+    .ts_packet_count_nolock = 0
+};
+
 static pthread_t thread_ts_parse;
 static pthread_t thread_ts;
 static pthread_t thread_i2c;
@@ -232,6 +241,7 @@ uint8_t process_command_line(int argc, char *argv[], longmynd_config_t *config) 
     strcpy(config->ts_fifo_path, "longmynd_main_ts");
     config->status_use_ip = false;
     strcpy(config->status_fifo_path, "longmynd_main_status");
+    strcpy(config->status2_fifo_path, "longmynd_aux_status");
     config->polarisation_supply=false;
     char polarisation_str[8];
     config->ts_timeout = 5*1000;
@@ -490,7 +500,7 @@ uint8_t process_command_line(int argc, char *argv[], longmynd_config_t *config) 
 }
 
 /* -------------------------------------------------------------------------------------------------- */
-uint8_t do_report(longmynd_status_t *status) {
+uint8_t do_report(longmynd_status_t *status, uint8_t stv0910_demod_path) {
 /* -------------------------------------------------------------------------------------------------- */
 /* interrogates the demodulator to find the interesting info to report                                */
 /*  status: the state struct                                                                          */
@@ -506,54 +516,54 @@ uint8_t do_report(longmynd_status_t *status) {
     }
 
     /* AGC1 Gain */
-    if (err==ERROR_NONE) err=stv0910_read_agc1_gain(STV0910_DEMOD_TOP, &status->agc1_gain);
+    if (err==ERROR_NONE) err=stv0910_read_agc1_gain(stv0910_demod_path, &status->agc1_gain);
 
     /* AGC2 Gain */
-    if (err==ERROR_NONE) err=stv0910_read_agc2_gain(STV0910_DEMOD_TOP, &status->agc2_gain);
+    if (err==ERROR_NONE) err=stv0910_read_agc2_gain(stv0910_demod_path, &status->agc2_gain);
 
     /* I,Q powers */
-    if (err==ERROR_NONE) err=stv0910_read_power(STV0910_DEMOD_TOP, &status->power_i, &status->power_q);
+    if (err==ERROR_NONE) err=stv0910_read_power(stv0910_demod_path, &status->power_i, &status->power_q);
 
     /* constellations */
     if (err==ERROR_NONE) {
         for (uint8_t count=0; (err==ERROR_NONE && count<NUM_CONSTELLATIONS); count++) {
-            err=stv0910_read_constellation(STV0910_DEMOD_TOP, &status->constellation[count][0], &status->constellation[count][1]);
+            err=stv0910_read_constellation(stv0910_demod_path, &status->constellation[count][0], &status->constellation[count][1]);
         }
     }
     
     /* puncture rate */
-    if (err==ERROR_NONE) err=stv0910_read_puncture_rate(STV0910_DEMOD_TOP, &status->puncture_rate);
+    if (err==ERROR_NONE) err=stv0910_read_puncture_rate(stv0910_demod_path, &status->puncture_rate);
 
     /* carrier frequency offset we are trying */
-    if (err==ERROR_NONE) err=stv0910_read_car_freq(STV0910_DEMOD_TOP, &status->frequency_offset);
+    if (err==ERROR_NONE) err=stv0910_read_car_freq(stv0910_demod_path, &status->frequency_offset);
 
     /* symbol rate we are trying */
-    if (err==ERROR_NONE) err=stv0910_read_sr(STV0910_DEMOD_TOP, &status->symbolrate);
+    if (err==ERROR_NONE) err=stv0910_read_sr(stv0910_demod_path, &status->symbolrate);
 
     /* viterbi error rate */
-    if (err==ERROR_NONE) err=stv0910_read_err_rate(STV0910_DEMOD_TOP, &status->viterbi_error_rate);
+    if (err==ERROR_NONE) err=stv0910_read_err_rate(stv0910_demod_path, &status->viterbi_error_rate);
 
     /* BER */
-    if (err==ERROR_NONE) err=stv0910_read_ber(STV0910_DEMOD_TOP, &status->bit_error_rate);
+    if (err==ERROR_NONE) err=stv0910_read_ber(stv0910_demod_path, &status->bit_error_rate);
 
     /* BCH Uncorrected Flag */
-    if (err==ERROR_NONE) err=stv0910_read_errors_bch_uncorrected(STV0910_DEMOD_TOP, &status->errors_bch_uncorrected);
+    if (err==ERROR_NONE) err=stv0910_read_errors_bch_uncorrected(stv0910_demod_path, &status->errors_bch_uncorrected);
 
     /* BCH Error Count */
-    if (err==ERROR_NONE) err=stv0910_read_errors_bch_count(STV0910_DEMOD_TOP, &status->errors_bch_count);
+    if (err==ERROR_NONE) err=stv0910_read_errors_bch_count(stv0910_demod_path, &status->errors_bch_count);
 
     /* LDPC Error Count */
-    if (err==ERROR_NONE) err=stv0910_read_errors_ldpc_count(STV0910_DEMOD_TOP, &status->errors_ldpc_count);
+    if (err==ERROR_NONE) err=stv0910_read_errors_ldpc_count(stv0910_demod_path, &status->errors_ldpc_count);
 
     /* MER */
     if(status->state==STATE_DEMOD_S || status->state==STATE_DEMOD_S2) {
-        if (err==ERROR_NONE) err=stv0910_read_mer(STV0910_DEMOD_TOP, &status->modulation_error_rate);
+        if (err==ERROR_NONE) err=stv0910_read_mer(stv0910_demod_path, &status->modulation_error_rate);
     } else {
         status->modulation_error_rate = 0;
     }
 
     /* MODCOD, Short Frames, Pilots */
-    if (err==ERROR_NONE) err=stv0910_read_modcod_and_type(STV0910_DEMOD_TOP, &status->modcod, &status->short_frame, &status->pilots);
+    if (err==ERROR_NONE) err=stv0910_read_modcod_and_type(stv0910_demod_path, &status->modcod, &status->short_frame, &status->pilots);
     if(status->state!=STATE_DEMOD_S2) {
         /* short frames & pilots only valid for S2 DEMOD state */
         status->short_frame = 0;
@@ -660,7 +670,7 @@ void *loop_i2c(void *arg) {
         /* Main receiver state machine */
         switch(status_cpy.state) {
             case STATE_DEMOD_HUNTING:
-                if (*err==ERROR_NONE) *err=do_report(&status_cpy);
+                if (*err==ERROR_NONE) *err=do_report(&status_cpy, 1);
                 /* process state changes */
                 if (*err==ERROR_NONE) *err=stv0910_read_scan_state(STV0910_DEMOD_TOP, &status_cpy.demod_state);
                 if (status_cpy.demod_state==DEMOD_FOUND_HEADER) {
@@ -679,7 +689,7 @@ void *loop_i2c(void *arg) {
                 break;
 
             case STATE_DEMOD_FOUND_HEADER:
-                if (*err==ERROR_NONE) *err=do_report(&status_cpy);
+                if (*err==ERROR_NONE) *err=do_report(&status_cpy, 1);
                 /* process state changes */
                 *err=stv0910_read_scan_state(STV0910_DEMOD_TOP, &status_cpy.demod_state);
                 if (status_cpy.demod_state==DEMOD_HUNTING) {
@@ -698,7 +708,7 @@ void *loop_i2c(void *arg) {
                 break;
 
             case STATE_DEMOD_S2:
-                if (*err==ERROR_NONE) *err=do_report(&status_cpy);
+                if (*err==ERROR_NONE) *err=do_report(&status_cpy, 1);
                 /* process state changes */
                 *err=stv0910_read_scan_state(STV0910_DEMOD_TOP, &status_cpy.demod_state);
                 if (status_cpy.demod_state==DEMOD_HUNTING) {
@@ -717,7 +727,7 @@ void *loop_i2c(void *arg) {
                 break;
 
             case STATE_DEMOD_S:
-                if (*err==ERROR_NONE) *err=do_report(&status_cpy);
+                if (*err==ERROR_NONE) *err=do_report(&status_cpy, 1);
                 /* process state changes */
                 *err=stv0910_read_scan_state(STV0910_DEMOD_TOP, &status_cpy.demod_state);
                 if (status_cpy.demod_state==DEMOD_HUNTING) {
@@ -739,6 +749,91 @@ void *loop_i2c(void *arg) {
                 *err=ERROR_STATE; /* we should never get here so panic if we do */
                 break;
         }
+
+        /* Aux receiver state machine */
+        switch(status_cpy.state2) {
+            case STATE_DEMOD_HUNTING:
+                if (*err==ERROR_NONE) *err=do_report(&status_cpy, 2);
+                /* process state changes */
+                if (*err==ERROR_NONE) *err=stv0910_read_scan_state(STV0910_DEMOD_BOTTOM, &status_cpy.demod_state);
+                if (status_cpy.demod_state2==DEMOD_FOUND_HEADER) {
+                    status_cpy.state2=STATE_DEMOD_FOUND_HEADER;
+                }
+                else if (status_cpy.demod_state2==DEMOD_S2) {
+                    status_cpy.state2=STATE_DEMOD_S2;
+                }
+                else if (status_cpy.demod_state2==DEMOD_S) {
+                    status_cpy.state=STATE_DEMOD_S;
+                }
+                else if ((status_cpy.demod_state2!=DEMOD_HUNTING) && (*err==ERROR_NONE)) {
+                    printf("ERROR: aux demodulator returned a bad scan state\n");
+                    *err=ERROR_BAD_DEMOD_HUNT_STATE; /* not allowed to have any other states */
+                } /* no need for another else, all states covered */
+                break;
+
+            case STATE_DEMOD_FOUND_HEADER:
+                if (*err==ERROR_NONE) *err=do_report(&status_cpy, 2);
+                /* process state changes */
+                *err=stv0910_read_scan_state(STV0910_DEMOD_BOTTOM, &status_cpy.demod_state2);
+                if (status_cpy.demod_state2==DEMOD_HUNTING) {
+                    status_cpy.state2=STATE_DEMOD_HUNTING;
+                }
+                else if (status_cpy.demod_state2==DEMOD_S2)  {
+                    status_cpy.state2=STATE_DEMOD_S2;
+                }
+                else if (status_cpy.demod_state2==DEMOD_S)  {
+                    status_cpy.state2=STATE_DEMOD_S;
+                }
+                else if ((status_cpy.demod_state2!=DEMOD_FOUND_HEADER) && (*err==ERROR_NONE)) {
+                    printf("ERROR: aux demodulator returned a bad scan state\n");
+                    *err=ERROR_BAD_DEMOD_HUNT_STATE; /* not allowed to have any other states */
+                } /* no need for another else, all states covered */
+                break;
+
+            case STATE_DEMOD_S2:
+                if (*err==ERROR_NONE) *err=do_report(&status_cpy, 2);
+                /* process state changes */
+                *err=stv0910_read_scan_state(STV0910_DEMOD_BOTTOM, &status_cpy.demod_state2);
+                if (status_cpy.demod_state2==DEMOD_HUNTING) {
+                    status_cpy.state2=STATE_DEMOD_HUNTING;
+                }
+                else if (status_cpy.demod_state2==DEMOD_FOUND_HEADER)  {
+                    status_cpy.state2=STATE_DEMOD_FOUND_HEADER;
+                }
+                else if (status_cpy.demod_state2==DEMOD_S) {
+                    status_cpy.state2=STATE_DEMOD_S;
+                }
+                else if ((status_cpy.demod_state2!=DEMOD_S2) && (*err==ERROR_NONE)) {
+                    printf("ERROR: aux demodulator returned a bad scan state\n");
+                    *err=ERROR_BAD_DEMOD_HUNT_STATE; /* not allowed to have any other states */
+                } /* no need for another else, all states covered */
+                break;
+
+            case STATE_DEMOD_S:
+                if (*err==ERROR_NONE) *err=do_report(&status_cpy, 2);
+                /* process state changes */
+                *err=stv0910_read_scan_state(STV0910_DEMOD_BOTTOM, &status_cpy.demod_state2);
+                if (status_cpy.demod_state2==DEMOD_HUNTING) {
+                    status_cpy.state2=STATE_DEMOD_HUNTING;
+                }
+                else if (status_cpy.demod_state2==DEMOD_FOUND_HEADER)  {
+                    status_cpy.state2=STATE_DEMOD_FOUND_HEADER;
+                }
+                else if (status_cpy.demod_state2==DEMOD_S2) {
+                    status_cpy.state2=STATE_DEMOD_S2;
+                }
+                else if ((status_cpy.demod_state2!=DEMOD_S) && (*err==ERROR_NONE)) {
+                    printf("ERROR: aux demodulator returned a bad scan state\n");
+                    *err=ERROR_BAD_DEMOD_HUNT_STATE; /* not allowed to have any other states */
+                } /* no need for another else, all states covered */
+                break;
+
+            default:
+                *err=ERROR_STATE; /* we should never get here so panic if we do */
+                break;
+        }
+
+        //------------------ edited until here
 
         if(status->ts_packet_count_nolock > 0
             && last_ts_packet_count != status->ts_packet_count_nolock)
