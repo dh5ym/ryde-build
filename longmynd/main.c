@@ -66,6 +66,13 @@ static longmynd_config_t longmynd_config = {
     .sr_index = 0
 };
 
+static longmynd_config_t longmynd_config_aux = {
+    .new = false,
+    .mutex = PTHREAD_MUTEX_INITIALIZER,
+    .freq_index = 0,
+    .sr_index = 0
+};
+
 static longmynd_status_t longmynd_status = {
     .service_name = "\0",
     .service_provider_name = "\0",
@@ -75,7 +82,7 @@ static longmynd_status_t longmynd_status = {
     .ts_packet_count_nolock = 0
 };
 
-static longmynd_status_t longmynd_status2 = {
+static longmynd_status_t longmynd_status_aux = {
     .service_name = "\0",
     .service_provider_name = "\0",
     .last_updated_monotonic = 0,
@@ -581,18 +588,24 @@ void *loop_i2c(void *arg) {
 /*  Status is written to the status struct                                                            */
 /* -------------------------------------------------------------------------------------------------- */
     thread_vars_t *thread_vars=(thread_vars_t *)arg;
+    thread_vars_t *thread_aux_vars=(thread_vars_t *)arg;
     longmynd_status_t *status=(longmynd_status_t *)thread_vars->status;
+    longmynd_status_t *status_aux=(longmynd_status_t *)thread_aux_vars->status;
     uint8_t *err = &thread_vars->thread_err;
+    uint8_t *err_aux = &thread_aux_vars->thread_err;
 
     *err=ERROR_NONE;
 
     longmynd_config_t config_cpy;
+    longmynd_config_t config_aux_cpy;
     longmynd_status_t status_cpy;
+    longmynd_status_t status_aux_cpy;
 
     uint32_t last_ts_packet_count = 0;
+    uint32_t last_aux_ts_packet_count = 0;
 
     uint64_t last_i2c_loop = monotonic_ms();
-    while (*err==ERROR_NONE && *thread_vars->main_err_ptr==ERROR_NONE) {
+    while (*err==ERROR_NONE && *thread_vars->main_err_ptr==ERROR_NONE && *err_aux==ERROR_NONE && *thread_aux_vars->main_err_ptr==ERROR_NONE) {
         /* Receiver State Machine Loop Timer */
         do {
             /* Sleep for at least 10ms */
@@ -600,14 +613,17 @@ void *loop_i2c(void *arg) {
         } while (monotonic_ms() < (last_i2c_loop + I2C_LOOP_MS));
 
         status_cpy.last_ts_or_reinit_monotonic = 0;
+        status_aux_cpy.last_ts_or_reinit_monotonic = 0;
 
-        /* Check if there's a new config */
+        /* Check if there's a new main config */
         if(thread_vars->config->new)
         {
             /* Lock config struct */
             pthread_mutex_lock(&thread_vars->config->mutex);
-            /* Clone status struct locally */
+            /* Clone main status struct locally */
             memcpy(&config_cpy, thread_vars->config, sizeof(longmynd_config_t));
+            /* Clone aux status struct locally */
+            memcpy(&config_aux_cpy, thread_vars->config, sizeof(longmynd_config_t));
             /* Clear new config flag */
             thread_vars->config->new = false;
             /* Set flag to clear ts buffer */
@@ -627,7 +643,7 @@ void *loop_i2c(void *arg) {
                 if (*err==ERROR_NONE) *err=stv0910_init(config_cpy.sr_requested[config_cpy.sr_index],config_cpy.sr_requested[config_cpy.sr_index],config_cpy.halfscan_ratio,0.0);
                 /* we only use one of the tuners in STV6120 so freq for tuner 2=0 to turn it off */
                 if (*err==ERROR_NONE) tuner_err=stv6120_init(config_cpy.freq_requested[config_cpy.freq_index],config_cpy.freq_requested[config_cpy.freq_index],config_cpy.port_swap);
-                
+
                 /* Tuner Lock timeout on some NIMs - Print message and pause, do..while() handles the retry logic */
                 if (*err==ERROR_NONE && tuner_err==ERROR_TUNER_LOCK_TIMEOUT)
                 {
@@ -665,6 +681,74 @@ void *loop_i2c(void *arg) {
             }
 
             status_cpy.last_ts_or_reinit_monotonic = monotonic_ms();
+        }
+
+        /* Check if there's a new aux config */
+        if(thread_aux_vars->config->new)
+        {
+            /* Lock config struct */
+            pthread_mutex_lock(&thread_aux_vars->config->mutex);
+            /* Clone main status struct locally */
+            memcpy(&config_aux_cpy, thread_aux_vars->config, sizeof(longmynd_config_t));
+            /* Clone aux status struct locally */
+            memcpy(&config_aux_cpy, thread_aux_vars->config, sizeof(longmynd_config_t));
+            /* Clear new config flag */
+            thread_aux_vars->config->new = false;
+            /* Set flag to clear ts buffer */
+            thread_aux_vars->config->ts_reset = true;
+            pthread_mutex_unlock(&thread_aux_vars->config->mutex);
+
+            status_aux_cpy.frequency_requested = config_aux_cpy.freq_requested[config_aux_cpy.freq_index];
+            status_aux_cpy.symbolrate_requested = config_aux_cpy.sr_requested[config_aux_cpy.sr_index];
+
+            uint8_t tuner_aux_err = ERROR_NONE; // Seperate to avoid triggering main() abort on handled tuner error.
+            int32_t tuner_aux_lock_attempts = STV6120_PLL_ATTEMPTS;
+            do
+            {
+                /* init all the modules */
+                if (*err_aux==ERROR_NONE) *err_aux=nim_init();
+                /* we are only using the one demodulator so set the other to 0 to turn it off */
+                if (*err_aux==ERROR_NONE) *err_aux=stv0910_init(config_cpy.sr_requested[config_cpy.sr_index],config_cpy.sr_requested[config_cpy.sr_index],config_cpy.halfscan_ratio,0.0);
+                /* we only use one of the tuners in STV6120 so freq for tuner 2=0 to turn it off */
+                if (*err_aux==ERROR_NONE) tuner_aux_err=stv6120_init(config_cpy.freq_requested[config_cpy.freq_index],config_cpy.freq_requested[config_cpy.freq_index],config_cpy.port_swap);
+                
+                /* Tuner Lock timeout on some NIMs - Print message and pause, do..while() handles the retry logic */
+                if (*err_aux==ERROR_NONE && tuner_aux_err==ERROR_TUNER_LOCK_TIMEOUT)
+                {
+                    printf("Flow AUX: Caught tuner lock timeout, %"PRIu32" attempts at stv6120_init() remaining.\n", tuner_aux_lock_attempts);
+                    /* Power down the synthesizers to potentially improve success on retry. */
+                    /* - Everything else gets powered down as well to stay within datasheet-defined states */
+                    *err_aux=stv6120_powerdown_both_paths();
+                    if (*err_aux==ERROR_NONE) usleep(200*1000);
+                }
+            } while (*thread_aux_vars->main_err_ptr==ERROR_NONE
+                    && *err_aux==ERROR_NONE
+                    && tuner_aux_err==ERROR_TUNER_LOCK_TIMEOUT
+                    && tuner_aux_lock_attempts-- > 0);
+
+            /* Propagate up tuner error from stv6120_init() */
+            if (*err_aux==ERROR_NONE) *err_aux = tuner_aux_err;
+
+            /* we turn on the LNA we want and turn the other off (if they exist) */
+            if (*err_aux==ERROR_NONE) *err_aux=stvvglna_init(NIM_INPUT_TOP,    (config_aux_cpy.port_swap) ? STVVGLNA_OFF : STVVGLNA_ON,  &status_cpy.lna_ok);
+            if (*err_aux==ERROR_NONE) *err_aux=stvvglna_init(NIM_INPUT_BOTTOM, (config_aux_cpy.port_swap) ? STVVGLNA_ON  : STVVGLNA_OFF, &status_cpy.lna_ok);
+
+            if (*err_aux!=ERROR_NONE) printf("ERROR AUX: failed to init a device - is the NIM powered on?\n");
+
+            /* Enable/Disable polarisation voltage supply */
+            if (*err_aux==ERROR_NONE) *err_aux=ftdi_set_polarisation_supply(config_aux_cpy.polarisation_supply, config_aux_cpy.polarisation_horizontal);
+            if (*err_aux==ERROR_NONE) {
+                status_aux_cpy.polarisation_supply = config_aux_cpy.polarisation_supply;
+                status_aux_cpy.polarisation_horizontal = config_aux_cpy.polarisation_horizontal;
+            }
+
+            /* now start the whole thing scanning for the signal */
+            if (*err_aux==ERROR_NONE) {
+                *err_aux=stv0910_start_scan(STV0910_DEMOD_TOP);
+                status_aux_cpy.state=STATE_DEMOD_HUNTING;
+            }
+
+            status_aux_cpy.last_ts_or_reinit_monotonic = monotonic_ms();
         }
 
         /* Main receiver state machine */
@@ -751,89 +835,87 @@ void *loop_i2c(void *arg) {
         }
 
         /* Aux receiver state machine */
-        switch(status_cpy.state2) {
+        switch(status_aux_cpy.state) {
             case STATE_DEMOD_HUNTING:
-                if (*err==ERROR_NONE) *err=do_report(&status_cpy, 2);
+                if (*err_aux==ERROR_NONE) *err_aux=do_report(&status_aux_cpy, 2);
                 /* process state changes */
-                if (*err==ERROR_NONE) *err=stv0910_read_scan_state(STV0910_DEMOD_BOTTOM, &status_cpy.demod_state);
-                if (status_cpy.demod_state2==DEMOD_FOUND_HEADER) {
-                    status_cpy.state2=STATE_DEMOD_FOUND_HEADER;
+                if (*err_aux==ERROR_NONE) *err_aux=stv0910_read_scan_state(STV0910_DEMOD_BOTTOM, &status_aux_cpy.demod_state);
+                if (status_aux_cpy.demod_state==DEMOD_FOUND_HEADER) {
+                    status_aux_cpy.state=STATE_DEMOD_FOUND_HEADER;
                 }
-                else if (status_cpy.demod_state2==DEMOD_S2) {
-                    status_cpy.state2=STATE_DEMOD_S2;
+                else if (status_aux_cpy.demod_state==DEMOD_S2) {
+                    status_aux_cpy.state=STATE_DEMOD_S2;
                 }
-                else if (status_cpy.demod_state2==DEMOD_S) {
-                    status_cpy.state=STATE_DEMOD_S;
+                else if (status_aux_cpy.demod_state==DEMOD_S) {
+                    status_aux_cpy.state=STATE_DEMOD_S;
                 }
-                else if ((status_cpy.demod_state2!=DEMOD_HUNTING) && (*err==ERROR_NONE)) {
-                    printf("ERROR: aux demodulator returned a bad scan state\n");
-                    *err=ERROR_BAD_DEMOD_HUNT_STATE; /* not allowed to have any other states */
+                else if ((status_aux_cpy.demod_state!=DEMOD_HUNTING) && (*err_aux==ERROR_NONE)) {
+                    printf("ERROR AUX: aux demodulator returned a bad scan state\n");
+                    *err_aux=ERROR_BAD_DEMOD_HUNT_STATE; /* not allowed to have any other states */
                 } /* no need for another else, all states covered */
                 break;
 
             case STATE_DEMOD_FOUND_HEADER:
-                if (*err==ERROR_NONE) *err=do_report(&status_cpy, 2);
+                if (*err_aux==ERROR_NONE) *err_aux=do_report(&status_aux_cpy, 2);
                 /* process state changes */
-                *err=stv0910_read_scan_state(STV0910_DEMOD_BOTTOM, &status_cpy.demod_state2);
-                if (status_cpy.demod_state2==DEMOD_HUNTING) {
-                    status_cpy.state2=STATE_DEMOD_HUNTING;
+                *err_aux=stv0910_read_scan_state(STV0910_DEMOD_BOTTOM, &status_aux_cpy.demod_state);
+                if (status_aux_cpy.demod_state==DEMOD_HUNTING) {
+                    status_aux_cpy.state=STATE_DEMOD_HUNTING;
                 }
-                else if (status_cpy.demod_state2==DEMOD_S2)  {
-                    status_cpy.state2=STATE_DEMOD_S2;
+                else if (status_aux_cpy.demod_state==DEMOD_S2)  {
+                    status_aux_cpy.state=STATE_DEMOD_S2;
                 }
-                else if (status_cpy.demod_state2==DEMOD_S)  {
-                    status_cpy.state2=STATE_DEMOD_S;
+                else if (status_aux_cpy.demod_state==DEMOD_S)  {
+                    status_aux_cpy.state=STATE_DEMOD_S;
                 }
-                else if ((status_cpy.demod_state2!=DEMOD_FOUND_HEADER) && (*err==ERROR_NONE)) {
-                    printf("ERROR: aux demodulator returned a bad scan state\n");
-                    *err=ERROR_BAD_DEMOD_HUNT_STATE; /* not allowed to have any other states */
+                else if ((status_aux_cpy.demod_state!=DEMOD_FOUND_HEADER) && (*err_aux==ERROR_NONE)) {
+                    printf("ERROR AUX: aux demodulator returned a bad scan state\n");
+                    *err_aux=ERROR_BAD_DEMOD_HUNT_STATE; /* not allowed to have any other states */
                 } /* no need for another else, all states covered */
                 break;
 
             case STATE_DEMOD_S2:
-                if (*err==ERROR_NONE) *err=do_report(&status_cpy, 2);
+                if (*err_aux==ERROR_NONE) *err_aux=do_report(&status_aux_cpy, 2);
                 /* process state changes */
-                *err=stv0910_read_scan_state(STV0910_DEMOD_BOTTOM, &status_cpy.demod_state2);
-                if (status_cpy.demod_state2==DEMOD_HUNTING) {
-                    status_cpy.state2=STATE_DEMOD_HUNTING;
+                *err_aux=stv0910_read_scan_state(STV0910_DEMOD_BOTTOM, &status_aux_cpy.demod_state);
+                if (status_aux_cpy.demod_state==DEMOD_HUNTING) {
+                    status_aux_cpy.state=STATE_DEMOD_HUNTING;
                 }
-                else if (status_cpy.demod_state2==DEMOD_FOUND_HEADER)  {
-                    status_cpy.state2=STATE_DEMOD_FOUND_HEADER;
+                else if (status_aux_cpy.demod_state==DEMOD_FOUND_HEADER)  {
+                    status_aux_cpy.state=STATE_DEMOD_FOUND_HEADER;
                 }
-                else if (status_cpy.demod_state2==DEMOD_S) {
-                    status_cpy.state2=STATE_DEMOD_S;
+                else if (status_aux_cpy.demod_state==DEMOD_S) {
+                    status_aux_cpy.state=STATE_DEMOD_S;
                 }
-                else if ((status_cpy.demod_state2!=DEMOD_S2) && (*err==ERROR_NONE)) {
-                    printf("ERROR: aux demodulator returned a bad scan state\n");
-                    *err=ERROR_BAD_DEMOD_HUNT_STATE; /* not allowed to have any other states */
+                else if ((status_aux_cpy.demod_state!=DEMOD_S2) && (*err_aux==ERROR_NONE)) {
+                    printf("ERROR AUX: aux demodulator returned a bad scan state\n");
+                    *err_aux=ERROR_BAD_DEMOD_HUNT_STATE; /* not allowed to have any other states */
                 } /* no need for another else, all states covered */
                 break;
 
             case STATE_DEMOD_S:
-                if (*err==ERROR_NONE) *err=do_report(&status_cpy, 2);
+                if (*err_aux==ERROR_NONE) *err_aux=do_report(&status_aux_cpy, 2);
                 /* process state changes */
-                *err=stv0910_read_scan_state(STV0910_DEMOD_BOTTOM, &status_cpy.demod_state2);
-                if (status_cpy.demod_state2==DEMOD_HUNTING) {
-                    status_cpy.state2=STATE_DEMOD_HUNTING;
+                *err_aux=stv0910_read_scan_state(STV0910_DEMOD_BOTTOM, &status_aux_cpy.demod_state);
+                if (status_aux_cpy.demod_state==DEMOD_HUNTING) {
+                    status_aux_cpy.state=STATE_DEMOD_HUNTING;
                 }
-                else if (status_cpy.demod_state2==DEMOD_FOUND_HEADER)  {
-                    status_cpy.state2=STATE_DEMOD_FOUND_HEADER;
+                else if (status_aux_cpy.demod_state==DEMOD_FOUND_HEADER)  {
+                    status_aux_cpy.state=STATE_DEMOD_FOUND_HEADER;
                 }
-                else if (status_cpy.demod_state2==DEMOD_S2) {
-                    status_cpy.state2=STATE_DEMOD_S2;
+                else if (status_aux_cpy.demod_state==DEMOD_S2) {
+                    status_aux_cpy.state=STATE_DEMOD_S2;
                 }
-                else if ((status_cpy.demod_state2!=DEMOD_S) && (*err==ERROR_NONE)) {
-                    printf("ERROR: aux demodulator returned a bad scan state\n");
-                    *err=ERROR_BAD_DEMOD_HUNT_STATE; /* not allowed to have any other states */
+                else if ((status_aux_cpy.demod_state!=DEMOD_S) && (*err_aux==ERROR_NONE)) {
+                    printf("ERROR AUX: aux demodulator returned a bad scan state\n");
+                    *err_aux=ERROR_BAD_DEMOD_HUNT_STATE; /* not allowed to have any other states */
                 } /* no need for another else, all states covered */
                 break;
 
             default:
-                *err=ERROR_STATE; /* we should never get here so panic if we do */
+                *err_aux=ERROR_STATE; /* we should never get here so panic if we do */
                 break;
         }
-
-        //------------------ edited until here
 
         if(status->ts_packet_count_nolock > 0
             && last_ts_packet_count != status->ts_packet_count_nolock)
@@ -842,8 +924,17 @@ void *loop_i2c(void *arg) {
             last_ts_packet_count = status->ts_packet_count_nolock;
         }
 
+        if(status_aux->ts_packet_count_nolock > 0
+            && last_aux_ts_packet_count != status_aux->ts_packet_count_nolock)
+        {
+            status_aux_cpy.last_ts_or_reinit_monotonic = monotonic_ms();
+            last_aux_ts_packet_count = status->ts_packet_count_nolock;
+        }
+
         /* Copy local status data over global object */
         pthread_mutex_lock(&status->mutex);
+        /* Copy local aux status data over global object */
+        pthread_mutex_lock(&status_aux->mutex);
 
         /* Copy out other vars */
         status->state = status_cpy.state;
@@ -875,11 +966,48 @@ void *loop_i2c(void *arg) {
             status->last_ts_or_reinit_monotonic = status_cpy.last_ts_or_reinit_monotonic;
         }
 
+        /* Copy out other aux vars */
+        status_aux->state = status_aux_cpy.state;
+        status_aux->demod_state = status_aux_cpy.demod_state;
+        status_aux->lna_ok = status_aux_cpy.lna_ok;
+        status_aux->lna_gain = status_aux_cpy.lna_gain;
+        status_aux->agc1_gain = status_aux_cpy.agc1_gain;
+        status_aux->agc2_gain = status_aux_cpy.agc2_gain;
+        status_aux->power_i = status_aux_cpy.power_i;
+        status_aux->power_q = status_aux_cpy.power_q;
+        status_aux->frequency_requested = status_aux_cpy.frequency_requested;
+        status_aux->frequency_offset = status_aux_cpy.frequency_offset;
+        status_aux->polarisation_supply = status_aux_cpy.polarisation_supply;
+        status_aux->polarisation_horizontal = status_aux_cpy.polarisation_horizontal;
+        status_aux->symbolrate_requested = status_aux_cpy.symbolrate_requested;
+        status_aux->symbolrate = status_aux_cpy.symbolrate;
+        status_aux->viterbi_error_rate = status_aux_cpy.viterbi_error_rate;
+        status_aux->bit_error_rate = status_aux_cpy.bit_error_rate;
+        status_aux->modulation_error_rate = status_aux_cpy.modulation_error_rate;
+        status_aux->errors_bch_uncorrected = status_aux_cpy.errors_bch_uncorrected;
+        status_aux->errors_bch_count = status_aux_cpy.errors_bch_count;
+        status_aux->errors_ldpc_count = status_aux_cpy.errors_ldpc_count;
+        memcpy(status_aux->constellation, status_aux_cpy.constellation, (sizeof(uint8_t) * NUM_CONSTELLATIONS * 2));
+        status_aux->puncture_rate = status_aux_cpy.puncture_rate;
+        status_aux->modcod = status_aux_cpy.modcod;
+        status_aux->short_frame = status_aux_cpy.short_frame;
+        status_aux->pilots = status_aux_cpy.pilots;
+        if(status_aux_cpy.last_ts_or_reinit_monotonic != 0) {
+            status_aux->last_ts_or_reinit_monotonic = status_aux_cpy.last_ts_or_reinit_monotonic;
+        }
+
         /* Set monotonic value to signal new data */
         status->last_updated_monotonic = monotonic_ms();
         /* Trigger pthread signal */
         pthread_cond_signal(&status->signal);
         pthread_mutex_unlock(&status->mutex);
+
+        /* Set aux monotonic value to signal new data */
+        status_aux->last_updated_monotonic = monotonic_ms();
+        /* Trigger pthread signal */
+        pthread_cond_signal(&status_aux->signal);
+        pthread_mutex_unlock(&status_aux->mutex);
+
 
         last_i2c_loop = monotonic_ms();
     }
@@ -980,6 +1108,7 @@ int main(int argc, char *argv[]) {
 /*    Print out of status information to requested interface, triggered by pthread condition variable */
 /* -------------------------------------------------------------------------------------------------- */
     uint8_t err = ERROR_NONE;
+    uint8_t err_aux = ERROR_NONE;
     uint8_t (*status_write)(uint8_t,uint32_t,bool*);
     uint8_t (*status_string_write)(uint8_t,char*,bool*);
     bool status_output_ready = true;
@@ -1011,7 +1140,14 @@ int main(int argc, char *argv[]) {
         .main_err_ptr = &err,
         .thread_err = ERROR_NONE,
         .config = &longmynd_config,
-        .status = &longmynd_status
+        .status = &longmynd_status,
+    };
+
+    thread_vars_t thread_aux_vars_ts = {
+        .main_err_ptr = &err_aux,
+        .thread_err = ERROR_NONE,
+        .config = &longmynd_config_aux,
+        .status = &longmynd_status_aux,
     };
 
     if(err==ERROR_NONE)
@@ -1026,6 +1162,8 @@ int main(int argc, char *argv[]) {
             err = ERROR_THREAD_ERROR;
         }
     }
+
+    // edit until here
 
     thread_vars_t thread_vars_ts_parse = {
         .main_err_ptr = &err,
